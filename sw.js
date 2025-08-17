@@ -1,121 +1,108 @@
-// Service Worker for offline functionality
+// Service Worker for GitHub Pages (project site) — cache-first for static assets,
+// network-first for navigation requests with offline fallback to index.html.
 
-const CACHE_NAME = 'tradesperson-workflow-v1';
-const urlsToCache = [
-  '/',
-  '/static/js/bundle.js',
-  '/static/css/main.css',
-  '/manifest.json'
+// IMPORTANT: register this SW with
+//   navigator.serviceWorker.register('./sw.js', { scope: './' });
+// and make sure all asset paths in HTML/JS are RELATIVE (./assets/... not /assets/...).
+
+const CACHE_NAME = 'tradesperson-workflow-v2';
+const BASE_URL = self.registration.scope; // e.g., https://user.github.io/repo/
+
+// Helper to make absolute URLs relative to the current scope/repo path
+const U = (path) => new URL(path, BASE_URL).toString();
+
+// Core files that should always be present
+const CORE_ASSETS = [
+  U('index.html'),
+  U('manifest.json'),
+  U('sw.js')
+  // Add more specific files below if you know them (e.g., U('assets/app.js'))
 ];
 
-// Install event - cache resources
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => {
-        console.log('Opened cache');
-        return cache.addAll(urlsToCache);
-      })
-      .catch((error) => {
-        console.log('Cache install failed:', error);
-      })
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(CORE_ASSETS))
   );
+  self.skipWaiting();
 });
 
-// Fetch event - serve from cache when offline
-self.addEventListener('fetch', (event) => {
-  event.respondWith(
-    caches.match(event.request)
-      .then((response) => {
-        // Return cached version or fetch from network
-        if (response) {
-          return response;
-        }
-        
-        // Clone the request because it's a stream
-        const fetchRequest = event.request.clone();
-        
-        return fetch(fetchRequest).then(
-          (response) => {
-            // Check if we received a valid response
-            if (!response || response.status !== 200 || response.type !== 'basic') {
-              return response;
-            }
-            
-            // Clone the response because it's a stream
-            const responseToCache = response.clone();
-            
-            caches.open(CACHE_NAME)
-              .then((cache) => {
-                cache.put(event.request, responseToCache);
-              });
-            
-            return response;
-          }
-        ).catch(() => {
-          // Return offline page for navigation requests
-          if (event.request.mode === 'navigate') {
-            return caches.match('/');
-          }
-        });
-      })
-  );
-});
-
-// Activate event - clean up old caches
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
-            console.log('Deleting old cache:', cacheName);
-            return caches.delete(cacheName);
-          }
-        })
-      );
-    })
+    caches.keys().then((names) =>
+      Promise.all(names.map((n) => (n !== CACHE_NAME ? caches.delete(n) : undefined)))
+    ).then(() => self.clients.claim())
   );
 });
 
-// Background sync for when connection is restored
-self.addEventListener('sync', (event) => {
-  if (event.tag === 'background-sync') {
-    event.waitUntil(
-      // Perform background sync operations
-      console.log('Background sync triggered')
+// Strategy:
+// - For navigations (HTML pages): try network first, fall back to cached index.html
+// - For same-origin static assets: cache-first, update cache in background
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+
+  const isSameOrigin = new URL(req.url).origin === new URL(BASE_URL).origin;
+  const isNavigation = req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html');
+
+  if (isNavigation) {
+    event.respondWith(
+      fetch(req)
+        .then((res) => {
+          // Optionally update cached index.html for offline
+          const copy = res.clone();
+          caches.open(CACHE_NAME).then((c) => c.put(U('index.html'), copy));
+          return res;
+        })
+        .catch(() => caches.match(U('index.html')))
+    );
+    return;
+  }
+
+  if (isSameOrigin) {
+    // cache-first for static assets
+    event.respondWith(
+      caches.match(req).then((cached) => {
+        if (cached) {
+          // Update in background
+          fetch(req).then((res) => {
+            if (res && res.status === 200 && res.type === 'basic') {
+              const copy = res.clone();
+              caches.open(CACHE_NAME).then((c) => c.put(req, copy));
+            }
+          }).catch(() => {});
+          return cached;
+        }
+        return fetch(req).then((res) => {
+          if (res && res.status === 200 && res.type === 'basic') {
+            const copy = res.clone();
+            caches.open(CACHE_NAME).then((c) => c.put(req, copy));
+          }
+          return res;
+        });
+      })
     );
   }
 });
 
-// Push notifications (for future use)
-self.addEventListener('push', (event) => {
-  if (event.data) {
-    const options = {
-      body: event.data.text(),
-      icon: '/icons/icon-192x192.png',
-      badge: '/icons/icon-72x72.png',
-      vibrate: [100, 50, 100],
-      data: {
-        dateOfArrival: Date.now(),
-        primaryKey: 1
-      },
-      actions: [
-        {
-          action: 'explore',
-          title: 'View',
-          icon: '/icons/checkmark.png'
-        },
-        {
-          action: 'close',
-          title: 'Close',
-          icon: '/icons/xmark.png'
-        }
-      ]
-    };
-    
-    event.waitUntil(
-      self.registration.showNotification('Tradesperson Workflow', options)
-    );
+// Background sync (placeholder)
+self.addEventListener('sync', (event) => {
+  if (event.tag === 'background-sync') {
+    event.waitUntil(Promise.resolve()); // replace with real work if needed
   }
+});
+
+// Push notifications (placeholder)
+self.addEventListener('push', (event) => {
+  if (!event.data) return;
+  const options = {
+    body: event.data.text(),
+    icon: U('icons/icon-192x192.png'),
+    badge: U('icons/icon-72x72.png'),
+    vibrate: [100, 50, 100],
+    data: { dateOfArrival: Date.now(), primaryKey: 1 },
+    actions: [
+      { action: 'explore', title: 'View', icon: U('icons/checkmark.png') },
+      { action: 'close', title: 'Close', icon: U('icons/xmark.png') }
+    ]
+  };
+  event.waitUntil(self.registration.showNotification('Tradesperson Workflow', options));
 });
